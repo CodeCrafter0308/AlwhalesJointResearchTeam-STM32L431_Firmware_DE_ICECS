@@ -60,6 +60,7 @@
 unsigned char I2C_Init(unsigned long clockFreq)
 {
     // Add your code here.
+    (void)clockFreq;
     MX_I2C1_Init();
     return 1;
 }
@@ -82,6 +83,7 @@ unsigned char I2C_Write(unsigned char slaveAddress,
                         unsigned char stopBit)
 {
     // Add your code here.
+    (void)stopBit;
 //  HAL_I2C_Master_Transmit(&hi2c1, slaveAddress, &dataBuffer, bytesNumber, 1000);
 //	return bytesNumber;
 	unsigned char status = 0;
@@ -115,6 +117,7 @@ unsigned char I2C_Read(unsigned char slaveAddress,
                        unsigned char stopBit)
 {
     // Add your code here.
+    (void)stopBit;
 //    HAL_I2C_Master_Receive(&hi2c1, slaveAddress, &dataBuffer, bytesNumber, 1000);
 //    return bytesNumber;
 	unsigned char status = 0;
@@ -158,6 +161,11 @@ unsigned char SPI_Init(unsigned char lsbFirst,
                        unsigned char clockEdg)
 {
     // Add your code here.
+    (void)lsbFirst;
+    (void)clockFreq;
+    (void)clockPol;
+    (void)clockEdg;
+    return 0;
 }
 
 /***************************************************************************//**
@@ -175,6 +183,10 @@ unsigned char SPI_Read(unsigned char slaveDeviceId,
                        unsigned char bytesNumber)
 {
     // Add your code here.
+    (void)slaveDeviceId;
+    (void)data;
+    (void)bytesNumber;
+    return 0;
 }
 
 /***************************************************************************//**
@@ -191,4 +203,8 @@ unsigned char SPI_Write(unsigned char slaveDeviceId,
                         unsigned char bytesNumber)
 {
     // Add your code here.
+    (void)slaveDeviceId;
+    (void)data;
+    (void)bytesNumber;
+    return 0;
 }

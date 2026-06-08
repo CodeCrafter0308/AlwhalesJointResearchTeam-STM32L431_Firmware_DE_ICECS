@@ -1,0 +1,41 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build Debug",
+            "type": "shell",
+            "command": "cube-cmake",
+            "args": [
+                "--build",
+                "${workspaceFolder}\\build\\Debug",
+                "--"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "Flash MCU (J-Link, no debug)",
+            "type": "shell",
+            "command": "C:\\Users\\niwangze\\AppData\\Local\\stm32cube\\bundles\\jlink-gdbserver\\9.24.0+st.1\\bin\\JLink.exe",
+            "args": [
+                "-device",
+                "STM32L432KB",
+                "-if",
+                "SWD",
+                "-speed",
+                "4000",
+                "-autoconnect",
+                "1",
+                "-CommanderScript",
+                "${workspaceFolder}\\.vscode\\flash.jlink"
+            ],
+            "dependsOn": "Build Debug",
+            "dependsOrder": "sequence",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            },
+            "problemMatcher": []
+        }
+    ]
+}

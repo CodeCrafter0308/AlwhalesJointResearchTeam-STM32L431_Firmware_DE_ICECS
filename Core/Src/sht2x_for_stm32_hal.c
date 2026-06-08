@@ -46,7 +46,7 @@ uint16_t SHT2x_GetRaw(uint8_t cmd) {
 	HAL_I2C_Master_Transmit(_sht2x_ui2c, SHT2x_I2C_ADDR << 1, &cmd, 1, SHT2x_TIMEOUT);
 	HAL_I2C_Master_Receive(_sht2x_ui2c, SHT2x_I2C_ADDR << 1, val, 3, SHT2x_TIMEOUT);
 	// 7位地址是0x40，HAL需要左移一位
-	HAL_StatusTypeDef rdy = HAL_I2C_IsDeviceReady(_sht2x_ui2c, SHT2x_I2C_ADDR << 1, 3, 50);
+	(void)HAL_I2C_IsDeviceReady(_sht2x_ui2c, SHT2x_I2C_ADDR << 1, 3, 50);
 	return val[0] << 8 | val[1];
 }
 
