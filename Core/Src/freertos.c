@@ -35,6 +35,8 @@
 #include "cJSON.h"
 #include "semphr.h"
 #include <string.h>
+#include <stdlib.h>
+#include <getopt.h>
 #include "message_buffer.h"
 #include "sht2x_for_stm32_hal.h"
 /* USER CODE END Includes */
@@ -56,6 +58,7 @@ typedef struct {
     unsigned long  startFreqHz;
     unsigned long  endFreqHz;
     unsigned long  incFreqHz;
+    unsigned long  fixedFreqHz;
     unsigned short incNum;
     uint32_t       version;
 } AppAD5933Config_t;
@@ -81,7 +84,8 @@ double          magnitude, impedance;
 #define SYS_LED_ON()			HAL_GPIO_WritePin(SYS_LED_GPIO_Port, SYS_LED_Pin, GPIO_PIN_RESET)
 #define SYS_LED_OFF()			HAL_GPIO_WritePin(SYS_LED_GPIO_Port, SYS_LED_Pin, GPIO_PIN_SET)
 
-#define CMD_LINE_MAX_LEN        64U
+#define CMD_LINE_MAX_LEN        96U
+#define CMD_ARGV_MAX            12
 #define CMD_FREQ_SCALE_HZ       1000UL
 
 // Get the PANID of the ZigBee module.
@@ -137,6 +141,7 @@ static AppAD5933Config_t gAD5933Config = {
     .startFreqHz = 5000UL,
     .endFreqHz = 100000UL,
     .incFreqHz = 1000UL,
+    .fixedFreqHz = 10000UL,
     .incNum = 95U,
     .version = 0U
 };
@@ -264,18 +269,20 @@ void AppTask_AD5933(void const * argument)
 	  (void)argument;
 	  // AD5933 初始化
 	  AD5933_Init();
+	  AD5933_Init();
 	  AD5933_Reset();
 	  AD5933_SetSystemClk(AD5933_CONTROL_INT_SYSCLK, 0);
 	  AD5933_SetRangeAndGain(AD5933_RANGE_1000mVpp, AD5933_GAIN_X1);
 
 	  // SHT20初始化
       SHT2x_Init(&hi2c3);
+      SHT2x_Init(&hi2c3);
 	  SHT2x_SetResolution(RES_14_12);
 
 	  // ID 与 NT
 	  char id[32];
 	  const char* NT = "";
-	  snprintf(id, sizeof(id), "0012");
+	  snprintf(id, sizeof(id), "0004");
 
 	  while (1) {
 	    AppAD5933Config_t config;
@@ -284,7 +291,11 @@ void AppTask_AD5933(void const * argument)
 	    GetAD5933Config(&config);
 
 	    // 配置扫频
-	    AD5933_ConfigSweep(config.startFreqHz, config.incFreqHz, config.incNum);
+	    if (config.mode == APP_FREQ_MODE_FIXED) {
+	        AD5933_ConfigSweep(config.fixedFreqHz, 0UL, 0U);
+	    } else {
+	        AD5933_ConfigSweep(config.startFreqHz, config.incFreqHz, config.incNum);
+	    }
 	    AD5933_StartSweep();
 
 	    if (config.mode == APP_FREQ_MODE_FIXED) {
@@ -293,7 +304,7 @@ void AppTask_AD5933(void const * argument)
 	            double Z, Zr, Zi, phase;
 
 	            AD5933_GetComplexImpedance(gainFactor, AD5933_FUNCTION_REPEAT_FREQ, &Z, &Zr, &Zi, &phase);
-	            PublishMeasurementJson(id, NT, config.startFreqHz, Z, phase);
+	            PublishMeasurementJson(id, NT, config.fixedFreqHz, Z, phase);
 	            vTaskDelay(250);
 	        }
 	        continue;
@@ -401,8 +412,8 @@ void AppTask_Command(void const * argument)
 {
   /* USER CODE BEGIN AppTask_Command */
     (void)argument;
-    QueueUartText("\r\nCMD READY: sweep=0,start_kHz,end_kHz,step_kHz; fixed=1,freq_kHz\r\n");
-    QueueUartText("Example: 0,5,100,1 or 1,10\r\n");
+    QueueUartText("\r\nCMD READY: set -o <0|1> [-q fixed_kHz] [-s start_kHz -e end_kHz -i step_kHz]\r\n");
+    QueueUartText("Examples: set -o 0 -s 5 -e 100 -i 1; set -o 1 -q 10\r\n");
 
     for (;;) {
         char line[CMD_LINE_MAX_LEN];
@@ -547,113 +558,227 @@ static uint8_t IsAD5933ConfigChanged(uint32_t version)
     return (config.version != version) ? 1U : 0U;
 }
 
-static uint8_t IsBlankTail(const char *text)
+static void PrintCommandHelp(void)
 {
-    while ((*text == ' ') || (*text == '\t')) {
-        text++;
+    QueueUartText("CMD HELP: set -o <0|1> [-q fixed_kHz] [-s start_kHz -e end_kHz -i step_kHz]\r\n");
+    QueueUartText("  -o 0: sweep mode, -o 1: fixed-frequency mode\r\n");
+    QueueUartText("  -q X: fixed frequency in kHz\r\n");
+    QueueUartText("  -s X -e Y -i Z: sweep start/end/step in kHz\r\n");
+    QueueUartText("Examples: set -o 0 -s 5 -e 100 -i 1; set -o 1 -q 10; set -q 10\r\n");
+}
+
+static uint8_t ParsePositiveKHz(const char *text, unsigned long *freqHz)
+{
+    char *end = NULL;
+    long value;
+
+    if ((text == NULL) || (freqHz == NULL)) {
+        return 0U;
     }
 
-    return (*text == '\0') ? 1U : 0U;
+    value = strtol(text, &end, 10);
+    if ((end == text) || (value <= 0)) {
+        return 0U;
+    }
+
+    while ((*end == ' ') || (*end == '\t')) {
+        end++;
+    }
+
+    if (*end != '\0') {
+        return 0U;
+    }
+
+    *freqHz = (unsigned long)value * CMD_FREQ_SCALE_HZ;
+    return 1U;
+}
+
+static int SplitCommandLine(char *line, char *argv[], int maxArgc)
+{
+    int argc = 0;
+    char *p = line;
+
+    while (*p != '\0') {
+        while ((*p == ' ') || (*p == '\t')) {
+            p++;
+        }
+
+        if (*p == '\0') {
+            break;
+        }
+
+        if (argc >= maxArgc) {
+            return -1;
+        }
+
+        argv[argc++] = p;
+
+        while ((*p != '\0') && (*p != ' ') && (*p != '\t')) {
+            p++;
+        }
+
+        if (*p != '\0') {
+            *p = '\0';
+            p++;
+        }
+    }
+
+    return argc;
 }
 
 static void HandleCommandLine(const char *line)
 {
-    const char *cmd = line;
-    int mode = -1;
-    long p1 = 0;
-    long p2 = 0;
-    long p3 = 0;
-    int end_pos = 0;
-    char reply[128];
+    char lineCopy[CMD_LINE_MAX_LEN];
+    char *argv[CMD_ARGV_MAX];
+    AppAD5933Config_t nextConfig;
+    unsigned long incNum;
+    int argc;
+    int opt;
+    int selectedMode = -1;
+    uint8_t hasMode = 0U;
+    uint8_t hasFixedFreq = 0U;
+    uint8_t hasSweepParam = 0U;
+    char reply[160];
 
-    while ((*cmd == ' ') || (*cmd == '\t')) {
-        cmd++;
-    }
-
-    if ((strcmp(cmd, "help") == 0) || (strcmp(cmd, "?") == 0)) {
-        QueueUartText("CMD HELP: sweep 0,start_kHz,end_kHz,step_kHz; fixed 1,freq_kHz\r\n");
-        QueueUartText("Example: 0,5,100,1 or 1,10\r\n");
+    if (line == NULL) {
         return;
     }
 
-    if ((sscanf(cmd, " %d , %ld , %ld , %ld %n", &mode, &p1, &p2, &p3, &end_pos) == 4) &&
-        (IsBlankTail(&cmd[end_pos]) != 0U)) {
-        unsigned long startHz;
-        unsigned long endHz;
-        unsigned long incHz;
-        unsigned long incNum;
+    strncpy(lineCopy, line, sizeof(lineCopy) - 1U);
+    lineCopy[sizeof(lineCopy) - 1U] = '\0';
 
-        if (mode != 0) {
-            QueueUartText("CMD ERR: sweep command must start with mode 0\r\n");
+    argc = SplitCommandLine(lineCopy, argv, CMD_ARGV_MAX);
+    if (argc == 0) {
+        return;
+    }
+    if (argc < 0) {
+        QueueUartText("CMD ERR: too many arguments\r\n");
+        return;
+    }
+
+    if ((strcmp(argv[0], "help") == 0) || (strcmp(argv[0], "?") == 0)) {
+        PrintCommandHelp();
+        return;
+    }
+
+    if (strcmp(argv[0], "set") != 0) {
+        QueueUartText("CMD ERR: command must start with 'set'\r\n");
+        PrintCommandHelp();
+        return;
+    }
+
+    GetAD5933Config(&nextConfig);
+    selectedMode = (int)nextConfig.mode;
+
+    optind = 1;
+    opterr = 0;
+
+    while ((opt = getopt(argc, argv, "ho:q:s:e:i:")) != -1) {
+        switch (opt) {
+        case 'h':
+            PrintCommandHelp();
+            return;
+
+        case 'o':
+            if ((strcmp(optarg, "0") != 0) && (strcmp(optarg, "1") != 0)) {
+                QueueUartText("CMD ERR: -o must be 0(sweep) or 1(fixed)\r\n");
+                return;
+            }
+            selectedMode = (optarg[0] == '0') ? APP_FREQ_MODE_SWEEP : APP_FREQ_MODE_FIXED;
+            hasMode = 1U;
+            break;
+
+        case 'q':
+            if (ParsePositiveKHz(optarg, &nextConfig.fixedFreqHz) == 0U) {
+                QueueUartText("CMD ERR: invalid -q fixed frequency\r\n");
+                return;
+            }
+            hasFixedFreq = 1U;
+            break;
+
+        case 's':
+            if (ParsePositiveKHz(optarg, &nextConfig.startFreqHz) == 0U) {
+                QueueUartText("CMD ERR: invalid -s sweep start frequency\r\n");
+                return;
+            }
+            hasSweepParam = 1U;
+            break;
+
+        case 'e':
+            if (ParsePositiveKHz(optarg, &nextConfig.endFreqHz) == 0U) {
+                QueueUartText("CMD ERR: invalid -e sweep end frequency\r\n");
+                return;
+            }
+            hasSweepParam = 1U;
+            break;
+
+        case 'i':
+            if (ParsePositiveKHz(optarg, &nextConfig.incFreqHz) == 0U) {
+                QueueUartText("CMD ERR: invalid -i sweep step frequency\r\n");
+                return;
+            }
+            hasSweepParam = 1U;
+            break;
+
+        default:
+            QueueUartText("CMD ERR: unknown option or missing option value\r\n");
+            PrintCommandHelp();
             return;
         }
-        if ((p1 <= 0) || (p2 <= 0) || (p3 <= 0) || (p2 < p1)) {
-            QueueUartText("CMD ERR: invalid sweep range\r\n");
-            return;
-        }
+    }
 
-        startHz = (unsigned long)p1 * CMD_FREQ_SCALE_HZ;
-        endHz = (unsigned long)p2 * CMD_FREQ_SCALE_HZ;
-        incHz = (unsigned long)p3 * CMD_FREQ_SCALE_HZ;
+    if (optind < argc) {
+        QueueUartText("CMD ERR: unexpected argument after options\r\n");
+        return;
+    }
 
-        if (((endHz - startHz) % incHz) != 0UL) {
-            QueueUartText("CMD ERR: (end-start) must be divisible by step\r\n");
-            return;
-        }
+    if ((hasMode == 0U) && (hasFixedFreq != 0U) && (hasSweepParam == 0U)) {
+        selectedMode = APP_FREQ_MODE_FIXED;
+    } else if ((hasMode == 0U) && (hasSweepParam != 0U) && (hasFixedFreq == 0U)) {
+        selectedMode = APP_FREQ_MODE_SWEEP;
+    } else if ((hasMode == 0U) && (hasSweepParam != 0U) && (hasFixedFreq != 0U)) {
+        QueueUartText("CMD ERR: use -o when mixing -q with sweep parameters\r\n");
+        return;
+    }
 
-        incNum = (endHz - startHz) / incHz;
-        if (incNum > AD5933_MAX_INC_NUM) {
-            QueueUartText("CMD ERR: too many sweep steps, max incNum is 511\r\n");
-            return;
-        }
+    if (nextConfig.endFreqHz < nextConfig.startFreqHz) {
+        QueueUartText("CMD ERR: sweep end must be >= sweep start\r\n");
+        return;
+    }
+    if (nextConfig.incFreqHz == 0UL) {
+        QueueUartText("CMD ERR: sweep step must be > 0\r\n");
+        return;
+    }
+    if (((nextConfig.endFreqHz - nextConfig.startFreqHz) % nextConfig.incFreqHz) != 0UL) {
+        QueueUartText("CMD ERR: (end-start) must be divisible by step\r\n");
+        return;
+    }
 
-        xSemaphoreTake(xAD5933ConfigMutex, portMAX_DELAY);
-        gAD5933Config.mode = APP_FREQ_MODE_SWEEP;
-        gAD5933Config.startFreqHz = startHz;
-        gAD5933Config.endFreqHz = endHz;
-        gAD5933Config.incFreqHz = incHz;
-        gAD5933Config.incNum = (unsigned short)incNum;
-        gAD5933Config.version++;
-        xSemaphoreGive(xAD5933ConfigMutex);
+    incNum = (nextConfig.endFreqHz - nextConfig.startFreqHz) / nextConfig.incFreqHz;
+    if (incNum > AD5933_MAX_INC_NUM) {
+        QueueUartText("CMD ERR: too many sweep steps, max incNum is 511\r\n");
+        return;
+    }
 
+    nextConfig.mode = (selectedMode == APP_FREQ_MODE_FIXED) ? APP_FREQ_MODE_FIXED : APP_FREQ_MODE_SWEEP;
+    nextConfig.incNum = (unsigned short)incNum;
+    nextConfig.version++;
+
+    xSemaphoreTake(xAD5933ConfigMutex, portMAX_DELAY);
+    gAD5933Config = nextConfig;
+    xSemaphoreGive(xAD5933ConfigMutex);
+
+    if (nextConfig.mode == APP_FREQ_MODE_FIXED) {
+        snprintf(reply, sizeof(reply), "CMD OK: mode=fixed freq=%lu Hz\r\n", nextConfig.fixedFreqHz);
+    } else {
         snprintf(reply, sizeof(reply),
-                 "CMD OK: sweep start=%lu Hz end=%lu Hz step=%lu Hz points=%lu\r\n",
-                 startHz, endHz, incHz, incNum + 1UL);
-        QueueUartText(reply);
-        return;
+                 "CMD OK: mode=sweep start=%lu Hz end=%lu Hz step=%lu Hz points=%lu\r\n",
+                 nextConfig.startFreqHz,
+                 nextConfig.endFreqHz,
+                 nextConfig.incFreqHz,
+                 incNum + 1UL);
     }
-
-    end_pos = 0;
-    if ((sscanf(cmd, " %d , %ld %n", &mode, &p1, &end_pos) == 2) &&
-        (IsBlankTail(&cmd[end_pos]) != 0U)) {
-        unsigned long freqHz;
-
-        if (mode != 1) {
-            QueueUartText("CMD ERR: fixed command must start with mode 1\r\n");
-            return;
-        }
-        if (p1 <= 0) {
-            QueueUartText("CMD ERR: invalid fixed frequency\r\n");
-            return;
-        }
-
-        freqHz = (unsigned long)p1 * CMD_FREQ_SCALE_HZ;
-
-        xSemaphoreTake(xAD5933ConfigMutex, portMAX_DELAY);
-        gAD5933Config.mode = APP_FREQ_MODE_FIXED;
-        gAD5933Config.startFreqHz = freqHz;
-        gAD5933Config.endFreqHz = freqHz;
-        gAD5933Config.incFreqHz = 0UL;
-        gAD5933Config.incNum = 0U;
-        gAD5933Config.version++;
-        xSemaphoreGive(xAD5933ConfigMutex);
-
-        snprintf(reply, sizeof(reply), "CMD OK: fixed freq=%lu Hz\r\n", freqHz);
-        QueueUartText(reply);
-        return;
-    }
-
-    QueueUartText("CMD ERR: use 0,start_kHz,end_kHz,step_kHz or 1,freq_kHz\r\n");
+    QueueUartText(reply);
 }
 
 static void StartCommandRx(void)
