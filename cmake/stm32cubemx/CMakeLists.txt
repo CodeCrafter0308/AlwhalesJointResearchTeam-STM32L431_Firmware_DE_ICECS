@@ -26,6 +26,7 @@ set(MX_Application_Src
     ${CMAKE_SOURCE_DIR}/Core/Src/gpio.c
     ${CMAKE_SOURCE_DIR}/Core/Src/freertos.c
     ${CMAKE_SOURCE_DIR}/Core/Src/i2c.c
+    ${CMAKE_SOURCE_DIR}/Core/Src/tim.c
     ${CMAKE_SOURCE_DIR}/Core/Src/usart.c
     ${CMAKE_SOURCE_DIR}/Core/Src/stm32l4xx_it.c
     ${CMAKE_SOURCE_DIR}/Core/Src/stm32l4xx_hal_msp.c
@@ -52,6 +53,8 @@ set(STM32_Drivers_Src
     C:/Users/niwangze/STM32Cube/Repository/STM32Cube_FW_L4_V1.18.2/Drivers/STM32L4xx_HAL_Driver/Src/stm32l4xx_hal_pwr_ex.c
     C:/Users/niwangze/STM32Cube/Repository/STM32Cube_FW_L4_V1.18.2/Drivers/STM32L4xx_HAL_Driver/Src/stm32l4xx_hal_cortex.c
     C:/Users/niwangze/STM32Cube/Repository/STM32Cube_FW_L4_V1.18.2/Drivers/STM32L4xx_HAL_Driver/Src/stm32l4xx_hal_exti.c
+    C:/Users/niwangze/STM32Cube/Repository/STM32Cube_FW_L4_V1.18.2/Drivers/STM32L4xx_HAL_Driver/Src/stm32l4xx_hal_tim.c
+    C:/Users/niwangze/STM32Cube/Repository/STM32Cube_FW_L4_V1.18.2/Drivers/STM32L4xx_HAL_Driver/Src/stm32l4xx_hal_tim_ex.c
     C:/Users/niwangze/STM32Cube/Repository/STM32Cube_FW_L4_V1.18.2/Drivers/STM32L4xx_HAL_Driver/Src/stm32l4xx_hal_uart.c
     C:/Users/niwangze/STM32Cube/Repository/STM32Cube_FW_L4_V1.18.2/Drivers/STM32L4xx_HAL_Driver/Src/stm32l4xx_hal_uart_ex.c
 )

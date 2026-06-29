@@ -29,6 +29,7 @@
 #include "Communication.h"
 #include "stdio.h"
 #include "usart.h"
+#include "tim.h"
 #include <stdio.h>
 #include <math.h>
 #include "i2c.h"
@@ -124,13 +125,14 @@ uint16_t ADCBuff[2] =
 float SHT2x_GetRelativeHumidity(uint8_t hold_master);
 static double computePhaseComp(unsigned long freq);
 static void QueueUartText(const char *text);
-static void PublishMeasurementJson(const char *id, const char *nt,
-                                   unsigned long currentFreqHz,
+static void PublishMeasurementJson(const char *id, unsigned long currentFreqHz,
                                    double impedanceValue,
                                    double phaseDeg);
 static void GetAD5933Config(AppAD5933Config_t *config);
 static uint8_t IsAD5933ConfigChanged(uint32_t version);
 static void HandleCommandLine(const char *line);
+static uint8_t ParsePwmDutyPermille(const char *text, uint32_t *dutyPermille);
+static uint8_t HandlePwmCommand(const char *text);
 static void StartCommandRx(void);
 /* USER CODE END PM */
 
@@ -153,20 +155,20 @@ static volatile uint16_t cmdRxIndex;
 static volatile uint8_t cmdPendingReady;
 static volatile uint8_t cmdLineOverflow;
 static volatile uint8_t cmdLineDropped;
+osThreadId Command_TaskHandle;
 /* USER CODE END Variables */
 osThreadId defaultTaskHandle;
 osThreadId AD5933_TaskHandle;
 osThreadId ZigBee_TaskHandle;
-osThreadId Command_TaskHandle;
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
+void AppTask_Command(void const * argument);
 /* USER CODE END FunctionPrototypes */
 
 void StartDefaultTask(void const * argument);
 void AppTask_AD5933(void const * argument);
 void AppTask_ZigBee(void const * argument);
-void AppTask_Command(void const * argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
@@ -230,7 +232,7 @@ void MX_FREERTOS_Init(void) {
   ZigBee_TaskHandle = osThreadCreate(osThread(ZigBee_Task), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
-  osThreadDef(Command_Task, AppTask_Command, osPriorityAboveNormal, 0, 512);
+  osThreadDef(Command_Task, AppTask_Command, osPriorityAboveNormal, 0, 1024);
   Command_TaskHandle = osThreadCreate(osThread(Command_Task), NULL);
   /* USER CODE END RTOS_THREADS */
 
@@ -281,8 +283,7 @@ void AppTask_AD5933(void const * argument)
 
 	  // ID 与 NT
 	  char id[32];
-	  const char* NT = "";
-	  snprintf(id, sizeof(id), "0004");
+	  snprintf(id, sizeof(id), "0002");
 
 	  while (1) {
 	    AppAD5933Config_t config;
@@ -304,7 +305,7 @@ void AppTask_AD5933(void const * argument)
 	            double Z, Zr, Zi, phase;
 
 	            AD5933_GetComplexImpedance(gainFactor, AD5933_FUNCTION_REPEAT_FREQ, &Z, &Zr, &Zi, &phase);
-	            PublishMeasurementJson(id, NT, config.fixedFreqHz, Z, phase);
+	            PublishMeasurementJson(id, config.fixedFreqHz, Z, phase);
 	            vTaskDelay(250);
 	        }
 	        continue;
@@ -339,8 +340,7 @@ void AppTask_AD5933(void const * argument)
 	        // 组 JSON
 	        cJSON *root = cJSON_CreateObject();
 	        cJSON_AddStringToObject(root, "ID",  id);
-	        cJSON_AddStringToObject(root, "NT",  NT);
-	        cJSON_AddNumberToObject(root, "Freq", current_freq);
+	        cJSON_AddNumberToObject(root, "Freq", current_freq / CMD_FREQ_SCALE_HZ);
 	        cJSON_AddNumberToObject(root, "Zr", Z_real);
 	        cJSON_AddNumberToObject(root, "Zi", Z_imag);
 	        cJSON_AddNumberToObject(root, "T", temp);
@@ -401,19 +401,13 @@ void AppTask_ZigBee(void const * argument)
   /* USER CODE END AppTask_ZigBee */
 }
 
-/* USER CODE BEGIN Header_AppTask_Command */
-/**
-* @brief Function implementing the Command_Task thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_AppTask_Command */
+/* Private application code --------------------------------------------------*/
+/* USER CODE BEGIN Application */
 void AppTask_Command(void const * argument)
 {
-  /* USER CODE BEGIN AppTask_Command */
     (void)argument;
-    QueueUartText("\r\nCMD READY: set -o <0|1> [-q fixed_kHz] [-s start_kHz -e end_kHz -i step_kHz]\r\n");
-    QueueUartText("Examples: set -o 0 -s 5 -e 100 -i 1; set -o 1 -q 10\r\n");
+    QueueUartText("\r\nCMD READY: set -pwm <0.0-1.0>; set -o <0|1> [-q fixed_kHz] [-s start_kHz -e end_kHz -i step_kHz]\r\n");
+    QueueUartText("Examples: set -pwm 0.3; set -o 0 -s 5 -e 100 -i 1; set -o 1 -q 10\r\n");
 
     for (;;) {
         char line[CMD_LINE_MAX_LEN];
@@ -449,11 +443,8 @@ void AppTask_Command(void const * argument)
 
         vTaskDelay(pdMS_TO_TICKS(20));
     }
-  /* USER CODE END AppTask_Command */
 }
 
-/* Private application code --------------------------------------------------*/
-/* USER CODE BEGIN Application */
 static double computePhaseComp(unsigned long freq) {
         return 7.53601e-4 * (double)freq - 90.46298;
 }
@@ -478,13 +469,12 @@ static void QueueUartText(const char *text)
     msg.buf = send_buf;
     msg.len = len;
 
-    if (xQueueSend(xJsonQueue, &msg, portMAX_DELAY) != pdPASS) {
+    if (xQueueSend(xJsonQueue, &msg, pdMS_TO_TICKS(100U)) != pdPASS) {
         vPortFree(send_buf);
     }
 }
 
-static void PublishMeasurementJson(const char *id, const char *nt,
-                                   unsigned long currentFreqHz,
+static void PublishMeasurementJson(const char *id, unsigned long currentFreqHz,
                                    double impedanceValue,
                                    double phaseDeg)
 {
@@ -506,8 +496,7 @@ static void PublishMeasurementJson(const char *id, const char *nt,
     }
 
     cJSON_AddStringToObject(root, "ID", id);
-    cJSON_AddStringToObject(root, "NT", nt);
-    cJSON_AddNumberToObject(root, "Freq", currentFreqHz);
+    cJSON_AddNumberToObject(root, "Freq", currentFreqHz / CMD_FREQ_SCALE_HZ);
     cJSON_AddNumberToObject(root, "Zr", Z_real);
     cJSON_AddNumberToObject(root, "Zi", Z_imag);
     cJSON_AddNumberToObject(root, "T", temp);
@@ -560,11 +549,112 @@ static uint8_t IsAD5933ConfigChanged(uint32_t version)
 
 static void PrintCommandHelp(void)
 {
-    QueueUartText("CMD HELP: set -o <0|1> [-q fixed_kHz] [-s start_kHz -e end_kHz -i step_kHz]\r\n");
+    QueueUartText("CMD HELP: set -pwm <0.0-1.0>; set -o <0|1> [-q fixed_kHz] [-s start_kHz -e end_kHz -i step_kHz]\r\n");
+    QueueUartText("  -pwm X: PWM duty ratio, 0.3 means 30%, 0.5 means 50%\r\n");
     QueueUartText("  -o 0: sweep mode, -o 1: fixed-frequency mode\r\n");
     QueueUartText("  -q X: fixed frequency in kHz\r\n");
     QueueUartText("  -s X -e Y -i Z: sweep start/end/step in kHz\r\n");
-    QueueUartText("Examples: set -o 0 -s 5 -e 100 -i 1; set -o 1 -q 10; set -q 10\r\n");
+    QueueUartText("Examples: set -pwm 0.3; set -o 0 -s 5 -e 100 -i 1; set -o 1 -q 10; set -q 10\r\n");
+}
+
+static uint8_t ParsePwmDutyPermille(const char *text, uint32_t *dutyPermille)
+{
+    const char *p = text;
+    uint32_t whole = 0U;
+    uint32_t frac = 0U;
+    uint32_t fracDigits = 0U;
+    uint8_t hasWholeDigit = 0U;
+    uint8_t hasFracDigit = 0U;
+    uint8_t fracNonZero = 0U;
+    uint8_t roundUp = 0U;
+
+    if ((text == NULL) || (dutyPermille == NULL) || (*text == '\0')) {
+        return 0U;
+    }
+
+    while ((*p >= '0') && (*p <= '9')) {
+        hasWholeDigit = 1U;
+        whole = (whole * 10U) + (uint32_t)(*p - '0');
+        if (whole > 1U) {
+            return 0U;
+        }
+        p++;
+    }
+
+    if (*p == '.') {
+        p++;
+        while ((*p >= '0') && (*p <= '9')) {
+            uint32_t digit = (uint32_t)(*p - '0');
+
+            hasFracDigit = 1U;
+            if (digit != 0U) {
+                fracNonZero = 1U;
+            }
+
+            if (fracDigits < 3U) {
+                frac = (frac * 10U) + digit;
+            } else if ((fracDigits == 3U) && (digit >= 5U)) {
+                roundUp = 1U;
+            }
+
+            fracDigits++;
+            p++;
+        }
+    }
+
+    if ((hasWholeDigit == 0U) && (hasFracDigit == 0U)) {
+        return 0U;
+    }
+    if ((*p != '\0') || ((whole == 1U) && (fracNonZero != 0U))) {
+        return 0U;
+    }
+
+    while (fracDigits < 3U) {
+        frac *= 10U;
+        fracDigits++;
+    }
+
+    if (whole == 1U) {
+        *dutyPermille = 1000U;
+    } else {
+        if ((roundUp != 0U) && (frac < 1000U)) {
+            frac++;
+        }
+        if (frac > 1000U) {
+            frac = 1000U;
+        }
+        *dutyPermille = frac;
+    }
+
+    return 1U;
+}
+
+static uint8_t HandlePwmCommand(const char *text)
+{
+    uint32_t dutyPermille;
+    uint32_t periodCounts;
+    uint32_t pulse;
+    char reply[80];
+
+    if (ParsePwmDutyPermille(text, &dutyPermille) == 0U) {
+        QueueUartText("CMD ERR: PWM duty must be 0.0 to 1.0\r\n");
+        return 0U;
+    }
+
+    periodCounts = htim1.Init.Period + 1U;
+    pulse = ((periodCounts * dutyPermille) + 500U) / 1000U;
+    if (pulse > periodCounts) {
+        pulse = periodCounts;
+    }
+
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, pulse);
+
+    snprintf(reply, sizeof(reply), "CMD OK: pwm duty=%lu.%lu%% pulse=%lu\r\n",
+             (unsigned long)(dutyPermille / 10U),
+             (unsigned long)(dutyPermille % 10U),
+             (unsigned long)pulse);
+    QueueUartText(reply);
+    return 1U;
 }
 
 static uint8_t ParsePositiveKHz(const char *text, unsigned long *freqHz)
@@ -664,6 +754,15 @@ static void HandleCommandLine(const char *line)
     if (strcmp(argv[0], "set") != 0) {
         QueueUartText("CMD ERR: command must start with 'set'\r\n");
         PrintCommandHelp();
+        return;
+    }
+
+    if ((argc >= 2) && (strcmp(argv[1], "-pwm") == 0)) {
+        if (argc != 3) {
+            QueueUartText("CMD ERR: use 'set -pwm <0.0-1.0>'\r\n");
+            return;
+        }
+        (void)HandlePwmCommand(argv[2]);
         return;
     }
 

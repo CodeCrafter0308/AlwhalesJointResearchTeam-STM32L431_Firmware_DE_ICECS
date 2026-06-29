@@ -20,6 +20,7 @@
 #include "main.h"
 #include "cmsis_os.h"
 #include "i2c.h"
+#include "tim.h"
 #include "usart.h"
 #include "gpio.h"
 
@@ -93,7 +94,13 @@ int main(void)
   MX_I2C1_Init();
   MX_USART1_UART_Init();
   MX_I2C3_Init();
+  MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, ((htim1.Init.Period + 1U) * 30U) / 100U);
+  if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
   /* USER CODE END 2 */
 
