@@ -85,6 +85,9 @@ double          magnitude, impedance;
 #define SYS_LED_ON()			HAL_GPIO_WritePin(SYS_LED_GPIO_Port, SYS_LED_Pin, GPIO_PIN_RESET)
 #define SYS_LED_OFF()			HAL_GPIO_WritePin(SYS_LED_GPIO_Port, SYS_LED_Pin, GPIO_PIN_SET)
 
+#ifndef APP_NODE_ID
+#define APP_NODE_ID             "0014"
+#endif
 #define CMD_LINE_MAX_LEN        96U
 #define CMD_ARGV_MAX            12
 #define CMD_FREQ_SCALE_HZ       1000UL
@@ -131,6 +134,7 @@ static void PublishMeasurementJson(const char *id, unsigned long currentFreqHz,
 static void GetAD5933Config(AppAD5933Config_t *config);
 static uint8_t IsAD5933ConfigChanged(uint32_t version);
 static void HandleCommandLine(const char *line);
+static int ExtractAndMatchTargetId(int *argc, char *argv[]);
 static uint8_t ParsePwmDutyPermille(const char *text, uint32_t *dutyPermille);
 static uint8_t HandlePwmCommand(const char *text);
 static void StartCommandRx(void);
@@ -279,11 +283,10 @@ void AppTask_AD5933(void const * argument)
 	  // SHT20初始化
       SHT2x_Init(&hi2c3);
       SHT2x_Init(&hi2c3);
-	  SHT2x_SetResolution(RES_14_12);
+	  SHT2x_SetResolution(RES_12_8);
 
 	  // ID 与 NT
-	  char id[32];
-	  snprintf(id, sizeof(id), "0002");
+	  const char *id = APP_NODE_ID;
 
 	  while (1) {
 	    AppAD5933Config_t config;
@@ -406,8 +409,8 @@ void AppTask_ZigBee(void const * argument)
 void AppTask_Command(void const * argument)
 {
     (void)argument;
-    QueueUartText("\r\nCMD READY: set -pwm <0.0-1.0>; set -o <0|1> [-q fixed_kHz] [-s start_kHz -e end_kHz -i step_kHz]\r\n");
-    QueueUartText("Examples: set -pwm 0.3; set -o 0 -s 5 -e 100 -i 1; set -o 1 -q 10\r\n");
+    QueueUartText("\r\nCMD READY: append '-id <sensor_id>' to every set command\r\n");
+    QueueUartText("Examples: set -pwm 0.3 -id 0011; set -o 0 -s 5 -e 100 -i 1 -id 0011; set -o 1 -q 10 -id 0011\r\n");
 
     for (;;) {
         char line[CMD_LINE_MAX_LEN];
@@ -549,12 +552,13 @@ static uint8_t IsAD5933ConfigChanged(uint32_t version)
 
 static void PrintCommandHelp(void)
 {
-    QueueUartText("CMD HELP: set -pwm <0.0-1.0>; set -o <0|1> [-q fixed_kHz] [-s start_kHz -e end_kHz -i step_kHz]\r\n");
+    QueueUartText("CMD HELP: set -pwm <0.0-1.0> -id <sensor_id>; set -o <0|1> [-q fixed_kHz] [-s start_kHz -e end_kHz -i step_kHz] -id <sensor_id>\r\n");
+    QueueUartText("  -id X: target sensor ID (this node is " APP_NODE_ID ")\r\n");
     QueueUartText("  -pwm X: PWM duty ratio, 0.3 means 30%, 0.5 means 50%\r\n");
     QueueUartText("  -o 0: sweep mode, -o 1: fixed-frequency mode\r\n");
     QueueUartText("  -q X: fixed frequency in kHz\r\n");
     QueueUartText("  -s X -e Y -i Z: sweep start/end/step in kHz\r\n");
-    QueueUartText("Examples: set -pwm 0.3; set -o 0 -s 5 -e 100 -i 1; set -o 1 -q 10; set -q 10\r\n");
+    QueueUartText("Examples: set -pwm 0.3 -id 0011; set -o 0 -s 5 -e 100 -i 1 -id 0011; set -o 1 -q 10 -id 0011\r\n");
 }
 
 static uint8_t ParsePwmDutyPermille(const char *text, uint32_t *dutyPermille)
@@ -716,6 +720,45 @@ static int SplitCommandLine(char *line, char *argv[], int maxArgc)
     return argc;
 }
 
+/*
+ * Remove the two-token "-id <sensor_id>" option before getopt processes the
+ * remaining single-character options.  Commands for other nodes are silently
+ * ignored because they share the same ZigBee/UART receive path.
+ *
+ * Return 1 for this node, 0 for another node, and -1 for malformed input.
+ */
+static int ExtractAndMatchTargetId(int *argc, char *argv[])
+{
+    const char *targetId = NULL;
+    int readIndex;
+    int writeIndex = 0;
+
+    if ((argc == NULL) || (argv == NULL)) {
+        return -1;
+    }
+
+    for (readIndex = 0; readIndex < *argc; readIndex++) {
+        if (strcmp(argv[readIndex], "-id") == 0) {
+            if ((targetId != NULL) || ((readIndex + 1) >= *argc) ||
+                (argv[readIndex + 1][0] == '\0')) {
+                return -1;
+            }
+
+            targetId = argv[readIndex + 1];
+            readIndex++;
+        } else {
+            argv[writeIndex++] = argv[readIndex];
+        }
+    }
+
+    *argc = writeIndex;
+    if (targetId == NULL) {
+        return -1;
+    }
+
+    return (strcmp(targetId, APP_NODE_ID) == 0) ? 1 : 0;
+}
+
 static void HandleCommandLine(const char *line)
 {
     char lineCopy[CMD_LINE_MAX_LEN];
@@ -724,6 +767,7 @@ static void HandleCommandLine(const char *line)
     unsigned long incNum;
     int argc;
     int opt;
+    int targetMatch;
     int selectedMode = -1;
     uint8_t hasMode = 0U;
     uint8_t hasFixedFreq = 0U;
@@ -757,9 +801,18 @@ static void HandleCommandLine(const char *line)
         return;
     }
 
+    targetMatch = ExtractAndMatchTargetId(&argc, argv);
+    if (targetMatch < 0) {
+        QueueUartText("CMD ERR: every set command requires exactly one '-id <sensor_id>'\r\n");
+        return;
+    }
+    if (targetMatch == 0) {
+        return;
+    }
+
     if ((argc >= 2) && (strcmp(argv[1], "-pwm") == 0)) {
         if (argc != 3) {
-            QueueUartText("CMD ERR: use 'set -pwm <0.0-1.0>'\r\n");
+            QueueUartText("CMD ERR: use 'set -pwm <0.0-1.0> -id <sensor_id>'\r\n");
             return;
         }
         (void)HandlePwmCommand(argv[2]);
