@@ -1,1 +1,33 @@
+# Local environment
+.env
+.venv/
+venv/
+
+# IDE/editor state
+.idea/
+.vscode/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Build and packaging output
+build/
+dist/
+installer-output/
+installer/SetupBuilder/Payload/*.exe
 Debug/
+[Bb]in/
+[Oo]bj/
+
+# Node dependencies
+node_modules/
+
+# Generated data and model artifacts
+*.csv
+*.dat
+*.pt
+*.h5
+/dataset/
+/weights/
